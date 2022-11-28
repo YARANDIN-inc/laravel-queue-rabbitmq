@@ -2,6 +2,9 @@
 
 namespace VladimirYuldashev\LaravelQueueRabbitMQ\Queue;
 
+use Illuminate\Contracts\Events\Dispatcher;
+use PhpAmqpLib\Exception\AMQPChannelClosedException;
+use PhpAmqpLib\Exception\AMQPConnectionClosedException;
 use RuntimeException;
 use Illuminate\Queue\Queue;
 use Illuminate\Support\Str;
@@ -12,6 +15,7 @@ use Interop\Amqp\AmqpContext;
 use Interop\Amqp\AmqpMessage;
 use Interop\Amqp\Impl\AmqpBind;
 use Illuminate\Contracts\Queue\Queue as QueueContract;
+use VladimirYuldashev\LaravelQueueRabbitMQ\Queue\Connectors\RabbitMQConnector;
 use VladimirYuldashev\LaravelQueueRabbitMQ\Queue\Jobs\RabbitMQJob;
 
 class RabbitMQQueue extends Queue implements QueueContract
@@ -29,11 +33,13 @@ class RabbitMQQueue extends Queue implements QueueContract
      * @var AmqpContext
      */
     protected $context;
+    protected $config;
     protected $correlationId;
 
     public function __construct(AmqpContext $context, array $config)
     {
         $this->context = $context;
+        $this->config = $config;
 
         $this->queueName = $config['queue'] ?? $config['options']['queue']['name'];
         $this->queueOptions = $config['options']['queue'];
@@ -164,10 +170,24 @@ class RabbitMQQueue extends Queue implements QueueContract
             if ($message = $consumer->receiveNoWait()) {
                 return new RabbitMQJob($this->container, $this, $consumer, $message);
             }
+        } catch (AMQPConnectionClosedException | AMQPChannelClosedException $exception) {
+            /*
+             * @see \Enqueue\AmqpLib\AmqpContext
+             * @see \PhpAmqpLib\Channel\AMQPChannel::close()
+             */
+            try {
+                $this->declaredExchanges = [];
+                $this->declaredQueues = [];
+
+                $dispatcher = app(Dispatcher::class);
+                $this->context = RabbitMQConnector::createContext($this->config, $dispatcher);
+            } catch (\Exception $e) {
+                // Silent reconnect attempt.
+            }
+
+            $this->reportConnectionError('pop', $exception);
         } catch (\Throwable $exception) {
             $this->reportConnectionError('pop', $exception);
-
-            return;
         }
     }
 
